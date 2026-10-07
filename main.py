@@ -12,14 +12,17 @@ logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
 
+# Настройки
 tracked_wallets = set()
-target_amount = None
-tolerance = 0.05
+min_amount = None
+max_amount = None
+chat_ids = set()  # сюда сохраняем чаты, куда слать алерты
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 async def is_new_wallet(address: str) -> bool:
+    """Считаем кошелёк новым, если у него ≤ 2 транзакций"""
     url = f"https://api.helius.xyz/v0/addresses/{address}/transactions?api-key={HELIUS_API_KEY}&limit=5"
     async with httpx.AsyncClient(timeout=15) as client:
         try:
@@ -32,25 +35,28 @@ async def is_new_wallet(address: str) -> bool:
             return False
 
 def is_amount_match(amount_sol: float) -> bool:
-    if target_amount is None:
+    """Проверяем, попадает ли сумма в диапазон min-max"""
+    if min_amount is None or max_amount is None:
         return False
-    return abs(amount_sol - target_amount) <= tolerance
+    return min_amount <= amount_sol <= max_amount
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
+    chat_ids.add(message.chat.id)
     text = (
         "👋 Бот для трекинга пополнений с бирж на новые кошельки Solana\n\n"
         "Команды:\n"
         "/add_wallet <адрес> — добавить кошелёк биржи\n"
-        "/set_amount <сумма> — установить сумму (например 3.22)\n"
-        "/set_tolerance <число> — допуск (по умолчанию 0.05)\n"
-        "/list — показать текущие настройки\n"
-        "/remove_wallet <адрес> — удалить кошелёк"
+        "/remove_wallet <адрес> — удалить кошелёк\n"
+        "/set_min <сумма> — минимальная сумма (например 2.10)\n"
+        "/set_max <сумма> — максимальная сумма (например 2.12)\n"
+        "/list — показать текущие настройки"
     )
     await message.answer(text)
 
 @dp.message(Command("add_wallet"))
 async def cmd_add_wallet(message: types.Message):
+    chat_ids.add(message.chat.id)
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
         await message.answer("Использование: /add_wallet <адрес_кошелька>")
@@ -64,6 +70,7 @@ async def cmd_add_wallet(message: types.Message):
 
 @dp.message(Command("remove_wallet"))
 async def cmd_remove_wallet(message: types.Message):
+    chat_ids.add(message.chat.id)
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
         await message.answer("Использование: /remove_wallet <адрес>")
@@ -75,41 +82,44 @@ async def cmd_remove_wallet(message: types.Message):
     else:
         await message.answer("Такого кошелька нет в списке")
 
-@dp.message(Command("set_amount"))
-async def cmd_set_amount(message: types.Message):
+@dp.message(Command("set_min"))
+async def cmd_set_min(message: types.Message):
+    chat_ids.add(message.chat.id)
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        await message.answer("Использование: /set_amount 3.22")
+        await message.answer("Использование: /set_min 2.10")
         return
     try:
         amount = float(args[1].replace(",", "."))
-        global target_amount
-        target_amount = amount
-        await message.answer(f"✅ Сумма установлена: {amount} SOL (±{tolerance})")
+        global min_amount
+        min_amount = amount
+        await message.answer(f"✅ Минимальная сумма установлена: {amount} SOL")
     except ValueError:
-        await message.answer("Нужно указать число, например: /set_amount 3.22")
+        await message.answer("Нужно указать число, например: /set_min 2.10")
 
-@dp.message(Command("set_tolerance"))
-async def cmd_set_tolerance(message: types.Message):
+@dp.message(Command("set_max"))
+async def cmd_set_max(message: types.Message):
+    chat_ids.add(message.chat.id)
     args = message.text.split(maxsplit=1)
     if len(args) < 2:
-        await message.answer("Использование: /set_tolerance 0.05")
+        await message.answer("Использование: /set_max 2.12")
         return
     try:
-        tol = float(args[1].replace(",", "."))
-        global tolerance
-        tolerance = tol
-        await message.answer(f"✅ Допуск установлен: ±{tol} SOL")
+        amount = float(args[1].replace(",", "."))
+        global max_amount
+        max_amount = amount
+        await message.answer(f"✅ Максимальная сумма установлена: {amount} SOL")
     except ValueError:
-        await message.answer("Нужно указать число, например: /set_tolerance 0.05")
+        await message.answer("Нужно указать число, например: /set_max 2.12")
 
 @dp.message(Command("list"))
 async def cmd_list(message: types.Message):
+    chat_ids.add(message.chat.id)
     wallets = "\n".join([f"`{w}`" for w in tracked_wallets]) or "пусто"
     text = (
         f"📋 Текущие настройки:\n\n"
-        f"Сумма: {target_amount or 'не задана'}\n"
-        f"Допуск: ±{tolerance}\n\n"
+        f"Мин. сумма: {min_amount if min_amount is not None else 'не задана'}\n"
+        f"Макс. сумма: {max_amount if max_amount is not None else 'не задана'}\n\n"
         f"Кошельки бирж ({len(tracked_wallets)}):\n{wallets}"
     )
     await message.answer(text, parse_mode="Markdown")
@@ -139,6 +149,7 @@ async def helius_webhook(request: web.Request):
             if not await is_new_wallet(to_wallet):
                 continue
 
+            # Всё подошло — отправляем алерт
             signature = tx.get("signature", "")
             solscan_wallet = f"https://solscan.io/account/{to_wallet}"
             photon = f"https://photon-sol.tinyastro.io/en/lp/{to_wallet}"
@@ -161,8 +172,18 @@ async def helius_webhook(request: web.Request):
                 ]
             ])
 
-            # Пока алерты не отправляются (нужно сохранить chat_id)
-            # Это поправим следующим шагом
+            # Отправляем во все сохранённые чаты
+            for chat_id in chat_ids:
+                try:
+                    await bot.send_message(
+                        chat_id=chat_id,
+                        text=text,
+                        parse_mode="HTML",
+                        reply_markup=keyboard,
+                        disable_web_page_preview=True
+                    )
+                except Exception as e:
+                    logging.error(f"Ошибка отправки в {chat_id}: {e}")
 
     return web.Response(text="ok")
 
