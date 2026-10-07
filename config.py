@@ -1,0 +1,15 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
+
+# Настройки по умолчанию
+DEFAULT_TOLERANCE = 0.05
+
+# Эти значения будут меняться командами бота
+tracked_wallets = set()          # кошельки бирж
+target_amount = None             # сумма, например 3.22
+tolerance = DEFAULT_TOLERANCE    # допуск ±0.05
