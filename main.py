@@ -21,6 +21,7 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 async def is_new_wallet(address: str) -> bool:
+    """Считаем кошелёк новым только если у него 0 транзакций"""
     url = f"https://api.helius.xyz/v0/addresses/{address}/transactions?api-key={HELIUS_API_KEY}&limit=5"
     async with httpx.AsyncClient(timeout=15) as client:
         try:
@@ -28,7 +29,7 @@ async def is_new_wallet(address: str) -> bool:
             if resp.status_code != 200:
                 return False
             data = resp.json()
-            return len(data) <= 2
+            return len(data) == 0
         except Exception:
             return False
 
@@ -77,7 +78,6 @@ async def cmd_remove_wallet(message: types.Message):
     address = args[1].strip()
     if address in wallets:
         del wallets[address]
-        # Удаляем из всех профилей
         for p in profiles.values():
             p["wallets"].discard(address)
         await message.answer(f"🗑 Кошелёк удалён")
@@ -240,6 +240,7 @@ async def cmd_list(message: types.Message):
     await message.answer(text, parse_mode="HTML")
 
 async def helius_webhook(request: web.Request):
+    logging.info("Webhook received from Helius")
     try:
         data = await request.json()
     except Exception:
@@ -260,7 +261,6 @@ async def helius_webhook(request: web.Request):
             if from_wallet not in wallets:
                 continue
 
-            # Проверяем все профили
             for profile_name, profile in profiles.items():
                 if from_wallet not in profile["wallets"]:
                     continue
@@ -271,7 +271,6 @@ async def helius_webhook(request: web.Request):
                 if not await is_new_wallet(to_wallet):
                     continue
 
-                # Нашли совпадение
                 label = wallets.get(from_wallet, from_wallet[:8])
                 signature = tx.get("signature", "")
                 solscan_wallet = f"https://solscan.io/account/{to_wallet}"
