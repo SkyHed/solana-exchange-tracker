@@ -12,16 +12,15 @@ logging.basicConfig(level=logging.INFO)
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 HELIUS_API_KEY = os.getenv("HELIUS_API_KEY")
 
-# === ДАННЫЕ ===
-wallets = {}          # address -> label
-profiles = {}         # name -> {"wallets": set(), "min": None, "max": None}
+wallets = {}
+profiles = {}
 chat_ids = set()
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 async def is_new_wallet(address: str) -> bool:
-    """Считаем кошелёк новым только если у него 0 транзакций"""
+    """Считаем новым, если 0 или 1 транзакция (текущая)"""
     url = f"https://api.helius.xyz/v0/addresses/{address}/transactions?api-key={HELIUS_API_KEY}&limit=5"
     async with httpx.AsyncClient(timeout=15) as client:
         try:
@@ -29,8 +28,11 @@ async def is_new_wallet(address: str) -> bool:
             if resp.status_code != 200:
                 return False
             data = resp.json()
-            return len(data) == 0
-        except Exception:
+            count = len(data)
+            logging.info(f"Wallet {address[:8]}... has {count} txs")
+            return count <= 1
+        except Exception as e:
+            logging.error(f"Error checking wallet: {e}")
             return False
 
 @dp.message(Command("start"))
@@ -39,17 +41,15 @@ async def cmd_start(message: types.Message):
     text = (
         "👋 Бот с профилями для трекинга пополнений\n\n"
         "<b>Основные команды:</b>\n"
-        "/add_wallet &lt;адрес&gt; [название] — добавить кошелёк\n"
-        "/remove_wallet &lt;адрес&gt; — удалить кошелёк\n"
-        "/create_profile &lt;название&gt; — создать профиль\n"
-        "/delete_profile &lt;название&gt; — удалить профиль\n"
-        "/add_to_profile &lt;профиль&gt; &lt;адрес&gt; — добавить кошелёк в профиль\n"
+        "/add_wallet &lt;адрес&gt; [название]\n"
+        "/remove_wallet &lt;адрес&gt;\n"
+        "/create_profile &lt;название&gt;\n"
+        "/delete_profile &lt;название&gt;\n"
+        "/add_to_profile &lt;профиль&gt; &lt;адрес&gt;\n"
         "/remove_from_profile &lt;профиль&gt; &lt;адрес&gt;\n"
         "/set_min &lt;профиль&gt; &lt;сумма&gt;\n"
         "/set_max &lt;профиль&gt; &lt;сумма&gt;\n"
-        "/list — показать всё\n"
-        "/list_wallets — только кошельки\n"
-        "/list_profiles — только профили"
+        "/list — показать всё"
     )
     await message.answer(text, parse_mode="HTML")
 
@@ -80,7 +80,7 @@ async def cmd_remove_wallet(message: types.Message):
         del wallets[address]
         for p in profiles.values():
             p["wallets"].discard(address)
-        await message.answer(f"🗑 Кошелёк удалён")
+        await message.answer("🗑 Кошелёк удалён")
     else:
         await message.answer("Такого кошелька нет")
 
@@ -184,45 +184,17 @@ async def cmd_set_max(message: types.Message):
     profiles[name]["max"] = amount
     await message.answer(f"✅ В профиле <b>{name}</b> max = {amount} SOL", parse_mode="HTML")
 
-@dp.message(Command("list_wallets"))
-async def cmd_list_wallets(message: types.Message):
-    chat_ids.add(message.chat.id)
-    if not wallets:
-        await message.answer("Кошельков пока нет")
-        return
-    text = "💼 <b>Кошельки:</b>\n\n"
-    for addr, label in wallets.items():
-        text += f"• <b>{label}</b>\n<code>{addr}</code>\n\n"
-    await message.answer(text, parse_mode="HTML")
-
-@dp.message(Command("list_profiles"))
-async def cmd_list_profiles(message: types.Message):
-    chat_ids.add(message.chat.id)
-    if not profiles:
-        await message.answer("Профилей пока нет")
-        return
-    text = "📁 <b>Профили:</b>\n\n"
-    for name, data in profiles.items():
-        w_count = len(data["wallets"])
-        min_v = data["min"] if data["min"] is not None else "—"
-        max_v = data["max"] if data["max"] is not None else "—"
-        text += f"• <b>{name}</b>\n  Кошельков: {w_count} | min: {min_v} | max: {max_v}\n\n"
-    await message.answer(text, parse_mode="HTML")
-
 @dp.message(Command("list"))
 async def cmd_list(message: types.Message):
     chat_ids.add(message.chat.id)
     text = "📋 <b>Полный список</b>\n\n"
-
     text += "<b>Кошельки:</b>\n"
     if wallets:
         for addr, label in wallets.items():
             text += f"• {label} — <code>{addr[:12]}...</code>\n"
     else:
         text += "пусто\n"
-    text += "\n"
-
-    text += "<b>Профили:</b>\n"
+    text += "\n<b>Профили:</b>\n"
     if profiles:
         for name, data in profiles.items():
             min_v = data["min"] if data["min"] is not None else "—"
@@ -236,7 +208,6 @@ async def cmd_list(message: types.Message):
                 text += "   (кошельков нет)\n"
     else:
         text += "пусто"
-
     await message.answer(text, parse_mode="HTML")
 
 async def helius_webhook(request: web.Request):
@@ -268,9 +239,12 @@ async def helius_webhook(request: web.Request):
                     continue
                 if not (profile["min"] <= amount_sol <= profile["max"]):
                     continue
+
+                # Проверяем новый кошелёк
                 if not await is_new_wallet(to_wallet):
                     continue
 
+                # Всё подошло — отправляем
                 label = wallets.get(from_wallet, from_wallet[:8])
                 signature = tx.get("signature", "")
                 solscan_wallet = f"https://solscan.io/account/{to_wallet}"
@@ -305,6 +279,7 @@ async def helius_webhook(request: web.Request):
                             reply_markup=keyboard,
                             disable_web_page_preview=True
                         )
+                        logging.info(f"Alert sent to {chat_id}")
                     except Exception as e:
                         logging.error(f"Ошибка отправки: {e}")
 
